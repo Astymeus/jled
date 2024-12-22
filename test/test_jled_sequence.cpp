@@ -1,6 +1,6 @@
 // JLed Unit tests  (run on host).
 // Copyright 2017-2021 Jan Delgado jdelgado@gmx.net
-#include "catch.hpp"
+#include "catch2/catch_amalgamated.hpp"
 
 #include <jled_base.h>  // NOLINT
 #include "hal_mock.h"   // NOLINT
@@ -15,13 +15,13 @@ class TestJLed : public TJLed<HalMock, TestJLed> {
 };
 
 // a group of JLed objects which can be controlled simultanously
-class TestJLedSequence : public TJLedSequence<TestJLed> {
-    using TJLedSequence<TestJLed>::TJLedSequence;
+class TestJLedSequence : public TJLedSequence<TestJLed, TestJLedSequence> {
+    using TJLedSequence<TestJLed, TestJLedSequence>::TJLedSequence;
 };
 
 // instanciate for test coverage measurement
 template class TJLed<HalMock, TestJLed>;
-template class TJLedSequence<TestJLed>;
+template class TJLedSequence<TestJLed, TestJLedSequence>;
 
 TEST_CASE("parallel sequence performs all updates", "[jled_sequence]") {
     constexpr uint8_t expected1[] = {255, 0, 0};
@@ -90,6 +90,24 @@ TEST_CASE("stop on sequence stops all JLeds and turns them off",
     }
 }
 
+TEST_CASE("sequence will stay off after stop when update is called"
+          " again (https://github.com/jandelgado/jled/issues/115)",
+          "[jled_sequence]") {
+    auto mode = GENERATE(TestJLedSequence::eMode::SEQUENCE,
+                         TestJLedSequence::eMode::PARALLEL);
+    SECTION("sequence stays off") {
+        INFO("mode = " << mode);
+        TestJLed leds[] = {TestJLed(HalMock(1)).On()};
+        auto seq = TestJLedSequence(mode, leds).Forever();
+
+        REQUIRE(seq.Update());
+        seq.Stop();
+        REQUIRE(!leds[0].IsRunning());
+        REQUIRE(!seq.Update());
+    }
+}
+
+
 TEST_CASE("repeat plays the sequence N times", "[jled_sequence]") {
     constexpr uint8_t expected[]{255, 0, 255, 0, 0};
 
@@ -153,6 +171,15 @@ TEST_CASE("Forever flag is set by call to Forever()", "[jled_sequence]") {
         auto seq = TestJLedSequence(mode, leds).Forever();
         REQUIRE(seq.IsForever());
     }
+}
+
+TEST_CASE("Forever and Repeat calls can be chained", "[jled_sequence]") {
+    // this is a compile time check only
+    TestJLed leds[] = {TestJLed(0)};
+    TestJLedSequence hal[[gnu::unused]] =
+        TestJLedSequence(TestJLedSequence::eMode::PARALLEL, leds)
+            .Repeat(1)
+            .Forever();
 }
 
 TEST_CASE("reset on sequence resets all JLeds", "[jled_sequence]") {

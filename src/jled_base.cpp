@@ -26,13 +26,12 @@ namespace jled {
 // pre-calculated fade-on function. This table samples the function
 //   y(x) =  exp(sin((t - period / 2.) * PI / period)) - 0.36787944)
 //   * 108.
-// at x={0,32,...,256}. In FadeOnFunc() we us linear interpolation
-// to
+// at x={0,32,...,256}. In FadeOnFunc() we us linear interpolation to
 // approximate the original function (so we do not need fp-ops).
 // fade-off and breath functions are all derived from fade-on, see
 // below.
 static constexpr uint8_t kFadeOnTable[] = {0,   3,   13,  33, 68,
-                                           118, 179, 232, 255};
+                                           118, 179, 232, 255}; // NOLINT
 
 // https://www.wolframalpha.com/input/?i=plot+(exp(sin((x-100%2F2.)*PI%2F100))-0.36787944)*108.0++x%3D0+to+100
 // The fade-on func is an approximation of
@@ -66,15 +65,25 @@ uint8_t rand8() {
     return (uint8_t)rand_;
 }
 
-// scale a byte by a factor, where only the lower 5 bits of factor are used.
-// i.e.  the scaling factor is in the range [0,31]. scale5 has the following
-// properties:
-//   scale5(x, f) = x*f / 32  for all x and f=0..30
-//   scale5(x, 31) = x  for all x
-uint8_t scale5(uint8_t val, uint8_t factor) {
-    if (factor == 31)
-        return val;  // optimize for most common case (full brightness)
-    return ((uint16_t)val * factor) >> 5;
+// scale a byte (val) by a byte (factor). scale8 has the following properties:
+//   scale8(0, f) == 0 for all f
+//   scale8(x, 255) == x for all x
+uint8_t scale8(uint8_t val, uint8_t factor) {
+    return (static_cast<uint16_t>(val)*static_cast<uint16_t>(factor))/255;
+}
+
+// interpolate a byte (val) to the interval [a,b].
+uint8_t lerp8by8(uint8_t val, uint8_t a, uint8_t b) {
+    if (a == 0 && b == 255) return val;  // optimize for most common case
+    const uint8_t delta = b - a;
+    return a + scale8(val, delta);
+}
+
+// the inverse of lerp8by8: invlerp8by8(lerp8by8(x, a, b,), a, b,) = x
+uint8_t invlerp8by8(uint8_t val, uint8_t a, uint8_t b) {
+    const uint16_t delta = b - a;
+    if (delta == 0) return 0;
+    return (static_cast<uint16_t>(val-a)*255)/(delta);
 }
 
 };  // namespace jled

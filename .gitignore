@@ -1,3 +1,5 @@
+.envrc
+.venv/
 .pio/
 **/.vscode
 test/bin
@@ -13,6 +15,7 @@ test/bin
 *.gcov
 *.gcno
 *.gcda
+*.lcov
 test/coverage.info
 test/report
 **/tags

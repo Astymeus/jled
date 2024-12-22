@@ -44,7 +44,14 @@ static constexpr uint8_t kZeroBrightness = 0;
 uint8_t fadeon_func(uint32_t t, uint16_t period);
 uint8_t rand8();
 void rand_seed(uint32_t s);
-uint8_t scale5(uint8_t val, uint8_t factor);
+uint8_t scale8(uint8_t val, uint8_t f);
+uint8_t lerp8by8(uint8_t val, uint8_t a, uint8_t b);
+uint8_t invlerp8by8(uint8_t val, uint8_t a, uint8_t b);
+
+template <typename T>
+static constexpr T __max(T a, T b) {
+    return (a > b) ? a : b;
+}
 
 // a function f(t,period,param) that calculates the LEDs brightness for a given
 // point in time and the given period. param is an optionally user provided
@@ -66,14 +73,16 @@ class CloneableBrightnessEvaluator : public BrightnessEvaluator {
 
 class ConstantBrightnessEvaluator : public CloneableBrightnessEvaluator {
     uint8_t val_;
+    uint16_t duration_;
 
  public:
     ConstantBrightnessEvaluator() = delete;
-    explicit ConstantBrightnessEvaluator(uint8_t val) : val_(val) {}
+    explicit ConstantBrightnessEvaluator(uint8_t val, uint16_t duration = 1)
+        : val_(val), duration_(duration) {}
     BrightnessEvaluator* clone(void* ptr) const override {
         return new (ptr) ConstantBrightnessEvaluator(*this);
     }
-    uint16_t Period() const override { return 1; }
+    uint16_t Period() const override { return duration_; }
     uint8_t Eval(uint32_t) const override { return val_; }
 };
 
@@ -94,36 +103,6 @@ class BlinkBrightnessEvaluator : public CloneableBrightnessEvaluator {
     }
 };
 
-// fade LED on
-class FadeOnBrightnessEvaluator : public CloneableBrightnessEvaluator {
-    uint16_t period_;
-
- public:
-    FadeOnBrightnessEvaluator() = delete;
-    explicit FadeOnBrightnessEvaluator(uint16_t period) : period_(period) {}
-    BrightnessEvaluator* clone(void* ptr) const override {
-        return new (ptr) FadeOnBrightnessEvaluator(*this);
-    }
-    uint16_t Period() const override { return period_; }
-    uint8_t Eval(uint32_t t) const override { return fadeon_func(t, period_); }
-};
-
-// fade LED off
-class FadeOffBrightnessEvaluator : public CloneableBrightnessEvaluator {
-    uint16_t period_;
-
- public:
-    FadeOffBrightnessEvaluator() = delete;
-    explicit FadeOffBrightnessEvaluator(uint16_t period) : period_(period) {}
-    BrightnessEvaluator* clone(void* ptr) const override {
-        return new (ptr) FadeOffBrightnessEvaluator(*this);
-    }
-    uint16_t Period() const override { return period_; }
-    uint8_t Eval(uint32_t t) const override {
-        return fadeon_func(period_ - t, period_);
-    }
-};
-
 // The breathe func is composed by fade-on, on and fade-off phases. For fading
 // we approximate the following function:
 //   y(x) = exp(sin((t-period/4.) * 2. * PI / period)) - 0.36787944) *  108.)
@@ -134,15 +113,21 @@ class BreatheBrightnessEvaluator : public CloneableBrightnessEvaluator {
     uint16_t duration_fade_on_;
     uint16_t duration_on_;
     uint16_t duration_fade_off_;
+    uint8_t from_;
+    uint8_t to_;
 
  public:
     BreatheBrightnessEvaluator() = delete;
     explicit BreatheBrightnessEvaluator(uint16_t duration_fade_on,
                                         uint16_t duration_on,
-                                        uint16_t duration_fade_off)
+                                        uint16_t duration_fade_off,
+                                        uint8_t from = 0,
+                                        uint8_t to = kFullBrightness)
         : duration_fade_on_(duration_fade_on),
           duration_on_(duration_on),
-          duration_fade_off_(duration_fade_off) {}
+          duration_fade_off_(duration_fade_off),
+          from_(from),
+          to_(to) {}
     BrightnessEvaluator* clone(void* ptr) const override {
         return new (ptr) BreatheBrightnessEvaluator(*this);
     }
@@ -150,15 +135,21 @@ class BreatheBrightnessEvaluator : public CloneableBrightnessEvaluator {
         return duration_fade_on_ + duration_on_ + duration_fade_off_;
     }
     uint8_t Eval(uint32_t t) const override {
+        uint8_t val = 0;
         if (t < duration_fade_on_)
-            return fadeon_func(t, duration_fade_on_);
+            val = fadeon_func(t, duration_fade_on_);
         else if (t < duration_fade_on_ + duration_on_)
-            return kFullBrightness;
-        else if (t < Period())
-            return fadeon_func(Period() - t, duration_fade_off_);
+            val = kFullBrightness;
         else
-            return kZeroBrightness;
+            val = fadeon_func(Period() - t, duration_fade_off_);
+        return lerp8by8(val, from_, to_);
     }
+
+    uint16_t DurationFadeOn() const { return duration_fade_on_; }
+    uint16_t DurationFadeOff() const { return duration_fade_off_; }
+    uint16_t DurationOn() const { return duration_on_; }
+    uint8_t From() const { return from_; }
+    uint8_t To() const { return to_; }
 };
 
 class CandleBrightnessEvaluator : public CloneableBrightnessEvaluator {
@@ -205,8 +196,12 @@ class TJLed {
     // Hardware abstraction giving access to the MCU
     HalType hal_;
 
+    // Evaluate effect(t) and scale to be within [minBrightness, maxBrightness]
+    // assumes brigthness_eval_ is set as it is not checked here.
+    uint8_t Eval(uint32_t t) const { return brightness_eval_->Eval(t); }
+
+    // Write val out to the "hardware", inverting signal when active-low is set.
     void Write(uint8_t val) {
-        val = scale5(val, maxBrightness_);
         hal_.analogWrite(IsLowActive() ? kFullBrightness - val : val);
     }
 
@@ -214,9 +209,10 @@ class TJLed {
     TJLed() = delete;
     explicit TJLed(const HalType& hal)
         : hal_{hal},
-          state_{ST_RUNNING},
+          state_{ST_INIT},
           bLowActive_{false},
-          maxBrightness_{(1 << kBitsBrightness) - 1} {}
+          minBrightness_{0},
+          maxBrightness_{255} {}
 
     explicit TJLed(typename HalType::PinType pin) : TJLed{HalType{pin}} {}
 
@@ -225,6 +221,7 @@ class TJLed {
     B& operator=(const TJLed<HalType, B>& rLed) {
         state_ = rLed.state_;
         bLowActive_ = rLed.bLowActive_;
+        minBrightness_ = rLed.minBrightness_;
         maxBrightness_ = rLed.maxBrightness_;
         num_repetitions_ = rLed.num_repetitions_;
         last_update_time_ = rLed.last_update_time_;
@@ -249,8 +246,6 @@ class TJLed {
 
     HalType& Hal() { return hal_; }
 
-    bool Update() { return Update(hal_.millis()); }
-
     // Set physical LED polarity to be low active. This inverts every
     // signal physically output to a pin.
     B& LowActive() {
@@ -261,29 +256,46 @@ class TJLed {
     bool IsLowActive() const { return bLowActive_; }
 
     // turn LED on
-    B& On() { return Set(kFullBrightness); }
+    B& On(uint16_t duration = 1) { return Set(kFullBrightness, duration); }
 
     // turn LED off
-    B& Off() { return Set(kZeroBrightness); }
+    B& Off(uint16_t duration = 1) { return Set(kZeroBrightness, duration); }
 
-    // Sets LED to given brightness
-    B& Set(uint8_t brightness) {
+    // Sets LED to given brightness. As for every effect, a duration can be
+    // specified. Update() will return false after the duration elapsed.
+    B& Set(uint8_t brightness, uint16_t duration = 1) {
         // note: we use placement new and therefore not need to keep track of
         // mem allocated
-        return SetBrightnessEval(new (brightness_eval_buf_)
-                                     ConstantBrightnessEvaluator(brightness));
+        return SetBrightnessEval(
+            new (brightness_eval_buf_)
+                ConstantBrightnessEvaluator(brightness, duration));
     }
 
     // Fade LED on
-    B& FadeOn(uint16_t duration) {
-        return SetBrightnessEval(new (brightness_eval_buf_)
-                                     FadeOnBrightnessEvaluator(duration));
+    B& FadeOn(uint16_t duration, uint8_t from = 0,
+              uint8_t to = kFullBrightness) {
+        return SetBrightnessEval(
+            new (brightness_eval_buf_)
+                BreatheBrightnessEvaluator(duration, 0, 0, from, to));
     }
 
     // Fade LED off - acutally is just inverted version of FadeOn()
-    B& FadeOff(uint16_t duration) {
-        return SetBrightnessEval(new (brightness_eval_buf_)
-                                     FadeOffBrightnessEvaluator(duration));
+    B& FadeOff(uint16_t duration, uint8_t from = kFullBrightness,
+               uint8_t to = 0) {
+        return SetBrightnessEval(
+            new (brightness_eval_buf_)
+                BreatheBrightnessEvaluator(0, 0, duration, to, from));
+    }
+
+    // Fade from "from" to "to" with period "duration". Sets up the breathe
+    // effect with the proper parameters and sets Min/Max brightness to reflect
+    // levels specified by "from" and "to".
+    B& Fade(uint8_t from, uint8_t to, uint16_t duration) {
+        if (from < to) {
+            return FadeOn(duration, from, to);
+        } else {
+            return FadeOff(duration, from, to);
+        }
     }
 
     // Set effect to Breathe, with the given period time in ms.
@@ -343,8 +355,12 @@ class TJLed {
 
     // Stop current effect and turn LED immeadiately off. Further calls to
     // Update() will have no effect.
-    B& Stop() {
-        Write(kZeroBrightness);
+    enum eStopMode { TO_MIN_BRIGHTNESS = 0, FULL_OFF, KEEP_CURRENT };
+    B& Stop(eStopMode mode = eStopMode::TO_MIN_BRIGHTNESS) {
+        if (mode != eStopMode::KEEP_CURRENT) {
+            Write(mode == eStopMode::FULL_OFF ? kZeroBrightness
+                                              : minBrightness_);
+        }
         state_ = ST_STOPPED;
         return static_cast<B&>(*this);
     }
@@ -353,28 +369,37 @@ class TJLed {
 
     // Reset to inital state
     B& Reset() {
-        time_start_ = kTimeUndef;
-        last_update_time_ = kTimeUndef;
-        state_ = ST_RUNNING;
+        time_start_ = 0;
+        last_update_time_ = 0;
+        state_ = ST_INIT;
         return static_cast<B&>(*this);
     }
 
-    // Sets the maximum brightness level. 255 is full brightness, 0 turns the
-    // effect off. Currently, only upper 5 bits of the provided value are used
-    // and stored.
+    // Sets the minimum brightness level (ranging from 0 to 255).
+    B& MinBrightness(uint8_t level) {
+        minBrightness_ = level;
+        return static_cast<B&>(*this);
+    }
+
+    // Returns current minimum brightness level.
+    uint8_t MinBrightness() const { return minBrightness_; }
+
+    // Sets the minimum brightness level (ranging from 0 to 255).
     B& MaxBrightness(uint8_t level) {
-        maxBrightness_ = level >> (8 - kBitsBrightness);
+        maxBrightness_ = level;
         return static_cast<B&>(*this);
     }
 
-    // Returns current maximum brightness level. Since currently only upper 5
-    // bits are used, lower 3 bits will always be 0.
-    uint8_t MaxBrightness() const {
-        return maxBrightness_ << (8 - kBitsBrightness);
-    }
+    // Returns current maximum brightness level.
+    uint8_t MaxBrightness() const { return maxBrightness_; }
 
- protected:
-    // update brightness of LED using the given brightness evaluator
+    // update brightness of LED using the given brightness evaluator and the
+    // current time. If the optional pLast pointer is set, then the actual
+    // brightness value (if an update happened), will be returned through
+    // the pointer. The value returned will be the calculated value after
+    // min- and max-brightness scaling was applied, which is the value that
+    // is written to the output.
+    //
     //  (brightness)                       ________________
     // on 255 |                         ¸-'
     //        |                      ¸-'
@@ -383,49 +408,72 @@ class TJLed {
     //        |<-delay before->|<--period-->|<-delay after-> (time)
     //                         | func(t)    |
     //                         |<- num_repetitions times  ->
-    bool Update(uint32_t now) {
+    bool Update(int16_t* pLast = nullptr) {
+        return Update(hal_.millis(), pLast);
+    }
+
+    bool Update(uint32_t t, int16_t* pLast = nullptr) {
         if (state_ == ST_STOPPED || !brightness_eval_) return false;
 
-        // no need to process updates twice during one time tick.
-        if (last_update_time_ == now) return true;
-
-        if (last_update_time_ == kTimeUndef) {
-            time_start_ = now + delay_before_;
+        if (state_ == ST_INIT) {
+            time_start_ = t + delay_before_;
+            state_ = ST_RUNNING;
+        } else {
+            // no need to process updates twice during one time tick.
+            if (!timeChangedSinceLastUpdate(t)) return true;
         }
-        last_update_time_ = now;
 
-        if ((int32_t)(now - time_start_) < 0) return true;
+        trackLastUpdateTime(t);
+
+        if (static_cast<int32_t>(t - time_start_) < 0) return true;
+
+        auto writeCur = [this](uint32_t t, int16_t* p) {
+            const auto val = lerp8by8(Eval(t), minBrightness_, maxBrightness_);
+            if (p) {
+                *p = val;
+            }
+            Write(val);
+        };
 
         // t cycles in range [0..period+delay_after-1]
         const auto period = brightness_eval_->Period();
-        const auto t = (now - time_start_) % (period + delay_after_);
 
+        if (!IsForever()) {
+            const auto time_end = time_start_ +
+                                  static_cast<uint32_t>(period + delay_after_) *
+                                      num_repetitions_ -
+                                  1;
+
+            if (static_cast<int32_t>(t - time_end) >= 0) {
+                // make sure final value of t = (period-1) is set
+                state_ = ST_STOPPED;
+                writeCur(period - 1, pLast);
+                return false;
+            }
+        }
+
+        t = (t - time_start_) % (period + delay_after_);
         if (t < period) {
             state_ = ST_RUNNING;
-            Write(brightness_eval_->Eval(t));
+            writeCur(t, pLast);
         } else {
             if (state_ == ST_RUNNING) {
                 // when in delay after phase, just call Write()
                 // once at the beginning.
                 state_ = ST_IN_DELAY_AFTER_PHASE;
-                Write(brightness_eval_->Eval(period - 1));
+                writeCur(period - 1, pLast);
             }
-        }
-
-        if (IsForever()) return true;
-
-        const auto time_end =
-            time_start_ + (uint32_t)(period + delay_after_) * num_repetitions_ -
-            1;
-
-        if ((int32_t)(now - time_end) >= 0) {
-            // make sure final value of t = (period-1) is set
-            state_ = ST_STOPPED;
-            Write(brightness_eval_->Eval(period - 1));
-            return false;
         }
         return true;
     }
+
+ protected:
+    // test if time stored in last_update_time_ differs from provided timestamp.
+    bool inline timeChangedSinceLastUpdate(uint32_t now) {
+        return (now & 255) != last_update_time_;
+    }
+
+    void trackLastUpdateTime(uint32_t t) { last_update_time_ = (t & 255); }
 
     B& SetBrightnessEval(BrightnessEvaluator* be) {
         brightness_eval_ = be;
@@ -433,54 +481,69 @@ class TJLed {
         return Reset();
     }
 
+ public:
+    // Number of bits used to control brightness with Min/MaxBrightness().
+    static constexpr uint8_t kBitsBrightness = 8;
+    static constexpr uint8_t kBrightnessStep = 1;
+
  private:
     static constexpr uint8_t ST_STOPPED = 0;
-    static constexpr uint8_t ST_RUNNING = 1;
-    static constexpr uint8_t ST_IN_DELAY_AFTER_PHASE = 2;
+    static constexpr uint8_t ST_INIT = 1;
+    static constexpr uint8_t ST_RUNNING = 2;
+    static constexpr uint8_t ST_IN_DELAY_AFTER_PHASE = 3;
 
     uint8_t state_ : 2;
     uint8_t bLowActive_ : 1;
-
-    // Number of bits used to control brightness with MaxBrightness(). Using
-    // only 5 bits here saves us a byte, since summing up with previous defs.
- public:
-    static constexpr uint8_t kBitsBrightness = 5;
-    static constexpr uint8_t kBrightnessStep = 1 << (8 - kBitsBrightness);
-
- private:
-    uint8_t maxBrightness_ : kBitsBrightness;
+    uint8_t minBrightness_;
+    uint8_t maxBrightness_;
 
     // this is where the BrightnessEvaluator object will be stored using
     // placment new.  Set MAX_SIZE to class occupying most memory
-    static constexpr auto MAX_SIZE = sizeof(CandleBrightnessEvaluator);
+    static constexpr auto MAX_SIZE =
+        __max(sizeof(CandleBrightnessEvaluator),
+              __max(sizeof(BreatheBrightnessEvaluator),
+                    __max(sizeof(ConstantBrightnessEvaluator),  // NOLINT
+                          sizeof(BlinkBrightnessEvaluator))));
     alignas(alignof(
         CloneableBrightnessEvaluator)) char brightness_eval_buf_[MAX_SIZE];
 
     static constexpr uint16_t kRepeatForever = 65535;
     uint16_t num_repetitions_ = 1;
 
-    static constexpr uint32_t kTimeUndef = -1;
-    uint32_t last_update_time_ = kTimeUndef;
-    uint32_t time_start_ = kTimeUndef;
+    // We store the timestamp the effect was last updated to avoid multiple
+    // updates when called during the same time tick.  Only the lower 8 bits of
+    // the timestamp are used (which saves us 3 bytes of memory per JLed
+    // instance), resulting in limited accuracy, which may lead to false
+    // negatives if Update() is not called for a longer time (i.e. > 255ms),
+    // which should not be a problem at all.
+    uint8_t last_update_time_ = 0;
+    uint32_t time_start_ = 0;
 
     uint16_t delay_before_ = 0;  // delay before the first effect starts
     uint16_t delay_after_ = 0;   // delay after each repetition
 };
 
-template<typename T> T* ptr(T &obj) {return &obj;}  // NOLINT
-template<typename T> T* ptr(T *obj) {return obj;}
+template <typename T>
+T* ptr(T& obj) {  // NOLINT
+    return &obj;
+}
+template <typename T>
+T* ptr(T* obj) {
+    return obj;
+}
 
 // a group of JLed objects which can be controlled simultanously, in parallel
 // or sequentially.
-template <typename T>
+template <typename L, typename B>
 class TJLedSequence {
  protected:
     // update all leds parallel. Returns true while any of the JLeds is
     // active, else false
     bool UpdateParallel() {
         auto result = false;
+        uint32_t t = ptr(leds_[0])->Hal().millis();
         for (auto i = 0u; i < n_; i++) {
-            result |= ptr(leds_[i])->Update();
+            result |= ptr(leds_[i])->Update(t);
         }
         return result;
     }
@@ -488,13 +551,10 @@ class TJLedSequence {
     // update all leds sequentially. Returns true while any of the JLeds is
     // active, else false
     bool UpdateSequentially() {
-        if (cur_ >= n_) {
-            return false;
-        }
         if (!ptr(leds_[cur_])->Update()) {
             return ++cur_ < n_;
         }
-        return true;;
+        return true;
     }
 
     void ResetLeds() {
@@ -503,24 +563,24 @@ class TJLedSequence {
         }
     }
 
-
  public:
     enum eMode { SEQUENCE, PARALLEL };
     TJLedSequence() = delete;
 
     template <size_t N>
-    TJLedSequence(eMode mode, T (&leds)[N]) : TJLedSequence(mode, leds, N) {}
+    TJLedSequence(eMode mode, L (&leds)[N]) : TJLedSequence(mode, leds, N) {}
 
-    TJLedSequence(eMode mode, T* leds, size_t n)
+    TJLedSequence(eMode mode, L* leds, size_t n)
         : mode_{mode}, leds_{leds}, cur_{0}, n_{n} {}
 
     bool Update() {
-        if (!is_running_) {
+        if (!is_running_ || n_ < 1) {
             return false;
         }
 
-        const auto led_running = (mode_ == eMode::PARALLEL) ? UpdateParallel()
-                                                  : UpdateSequentially();
+        const auto led_running = (mode_ == eMode::PARALLEL)
+                                     ? UpdateParallel()
+                                     : UpdateSequentially();
         if (led_running) {
             return true;
         }
@@ -529,7 +589,7 @@ class TJLedSequence {
         cur_ = 0;
         ResetLeds();
 
-        is_running_ = ++iteration_ < num_repetitions_  ||
+        is_running_ = ++iteration_ < num_repetitions_ ||
                       num_repetitions_ == kRepeatForever;
 
         return is_running_;
@@ -543,26 +603,27 @@ class TJLedSequence {
     }
 
     void Stop() {
+        is_running_ = false;
         for (auto i = 0u; i < n_; i++) {
-            leds_[i].Stop();
+            ptr(leds_[i])->Stop();
         }
     }
 
     // set number of repetitions for the sequence
-    TJLedSequence<T> Repeat(uint16_t num_repetitions) {
+    B& Repeat(uint16_t num_repetitions) {
         num_repetitions_ = num_repetitions;
-        return *this;
+        return static_cast<B&>(*this);
     }
 
     // repeat Forever
-    TJLedSequence<T> Forever() { return Repeat(kRepeatForever); }
+    B& Forever() { return Repeat(kRepeatForever); }
     bool IsForever() const { return num_repetitions_ == kRepeatForever; }
 
  private:
-    const eMode mode_;
-    T* leds_;
+    eMode mode_;
+    L* leds_;
     size_t cur_;
-    const size_t n_;
+    size_t n_;
     static constexpr uint16_t kRepeatForever = 65535;
     uint16_t num_repetitions_ = 1;
     uint16_t iteration_ = 0;
@@ -570,5 +631,4 @@ class TJLedSequence {
 };
 
 };  // namespace jled
-
 #endif  // SRC_JLED_BASE_H_
